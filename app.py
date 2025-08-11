@@ -39,7 +39,7 @@ def get_conversation_history(phone_number):
     
     if phone_number not in conversations:
         conversations[phone_number] = {
-            "messages": [{"role": "system", "content": "You are a helpful assistant. You can analyze images and have conversations. Remember previous messages in this conversation."}],
+            "messages": [{"role": "system", "content": "You are a professional AI translation assistant. Help people translate text between languages and communicate effectively. When users send text in any language, detect the language and provide English translations. Also assist with explanations and language learning."}],
             "last_active": datetime.now()
         }
     
@@ -84,7 +84,7 @@ def analyze_image(media_url, caption="", phone_number=None):
             "content": [
                 {
                     "type": "text",
-                    "text": f"Please analyze this image and describe what you see. {f'The user also provided this caption: {caption}' if caption else ''}"
+                    "text": f"Please analyze this image and help translate any text you see. If there's text in the image, translate it to English. Also describe what you see. {f'The user also provided this caption: {caption}' if caption else ''}"
                 },
                 {
                     "type": "image_url",
@@ -155,7 +155,7 @@ def whatsapp_reply():
             # Process text message with conversation memory
             incoming_msg = request.form.get('Body', '').strip()
             if not incoming_msg:
-                reply_text = "I received your message but couldn't understand it. Please send some text or an image."
+                reply_text = "I received your message but couldn't understand it. Please send some text or an image for translation."
             else:
                 # Get conversation history
                 messages = get_conversation_history(from_number)
@@ -210,21 +210,22 @@ def whatsapp_reply():
     
     return str(resp)
 
+@app.route("/", methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return "AI Translation Service is running! 🤖🌍"
+
 @app.route("/stats", methods=['GET'])
 def conversation_stats():
     """Endpoint to see conversation statistics (for debugging)"""
-    cleanup_old_conversations()
     stats = {
         "active_conversations": len(conversations),
-        "conversations": {
-            number: {
-                "message_count": len(data["messages"]) - 1,  # Exclude system message
-                "last_active": data["last_active"].strftime("%Y-%m-%d %H:%M:%S")
-            }
-            for number, data in conversations.items()
-        }
+        "service": "AI Translation Service",
+        "status": "operational"
     }
     return stats
 
 if __name__ == "__main__":
-    app.run(port=5000, debug=True)
+    # Use Railway's PORT environment variable
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
