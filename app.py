@@ -31,15 +31,29 @@ client = OpenAI(
 # In-memory conversation storage
 # Structure: {phone_number: {"messages": [...], "last_active": datetime}}
 conversations = {}
-MAX_MESSAGES_PER_CONVERSATION = 200  # Much more generous limit for GPT-4.1's 1M token context
+MAX_MESSAGES_PER_CONVERSATION = 200  # Generous limit for GPT-4.1's 1M token context
 
 def get_conversation_history(phone_number):
     """Get conversation history for a phone number"""
-    # Removed cleanup - conversations persist indefinitely
-    
     if phone_number not in conversations:
         conversations[phone_number] = {
-            "messages": [{"role": "system", "content": "You are a professional AI translation assistant. Help people translate text between languages and communicate effectively. When users send text in any language, detect the language and provide English translations. Also assist with explanations and language learning."}],
+            "messages": [{"role": "system", "content": """Eres un asistente de traducción inteligente especializado en traducir del inglés al español. Tu trabajo es:
+
+1. **Traducir texto**: Cuando recibas texto en inglés, tradúcelo al español usando palabras simples y claras que cualquier persona pueda entender. Evita palabras complicadas o técnicas.
+
+2. **Analizar imágenes**: Cuando recibas imágenes con texto, identifica y traduce todo el texto visible al español. También describe brevemente lo que ves en la imagen.
+
+3. **Explicar de forma simple**: Tus explicaciones deben ser cortas, claras y fáciles de entender. No uses palabras rebuscadas ni hagas explicaciones muy largas.
+
+4. **Responder en español**: Siempre responde en español, usando un tono amigable y profesional.
+
+5. **Ayudar con el contexto**: Si algo no está claro, puedes pedir más contexto o dar una explicación breve del significado.
+
+Ejemplo:
+- Si recibo: "Hello, how are you?"
+- Respondo: "Hola, ¿cómo estás?"
+
+Mantén todo simple, claro y en español."""}],
             "last_active": datetime.now()
         }
     
@@ -84,7 +98,7 @@ def analyze_image(media_url, caption="", phone_number=None):
             "content": [
                 {
                     "type": "text",
-                    "text": f"Please analyze this image and help translate any text you see. If there's text in the image, translate it to English. Also describe what you see. {f'The user also provided this caption: {caption}' if caption else ''}"
+                    "text": f"Por favor analiza esta imagen y traduce al español cualquier texto que veas. También describe brevemente lo que hay en la imagen. {f'El usuario también envió este mensaje: {caption}' if caption else ''}"
                 },
                 {
                     "type": "image_url",
@@ -97,7 +111,7 @@ def analyze_image(media_url, caption="", phone_number=None):
         
         # Add user message to conversation
         if phone_number:
-            add_to_conversation(phone_number, "user", f"[Sent an image{f' with caption: {caption}' if caption else ''}]")
+            add_to_conversation(phone_number, "user", f"[Envió una imagen{f' con mensaje: {caption}' if caption else ''}]")
         
         # Use conversation history + current image message
         current_messages = messages + [user_message]
@@ -106,7 +120,7 @@ def analyze_image(media_url, caption="", phone_number=None):
         gpt_response = client.chat.completions.create(
             model=MODEL,
             messages=current_messages,
-            temperature=0.7,
+            temperature=0.3,  # Lower temperature for more consistent translations
             max_tokens=1000
         )
         
@@ -119,9 +133,9 @@ def analyze_image(media_url, caption="", phone_number=None):
         return assistant_reply
         
     except requests.RequestException as e:
-        return f"⚠️ Error downloading image: {str(e)}"
+        return f"⚠️ Error al descargar la imagen: {str(e)}"
     except Exception as e:
-        return f"⚠️ Error analyzing image: {str(e)}"
+        return f"⚠️ Error al analizar la imagen: {str(e)}"
 
 @app.route("/whatsapp", methods=['POST'])
 def whatsapp_reply():
@@ -139,14 +153,14 @@ def whatsapp_reply():
             # Process image
             media_url = request.form.get('MediaUrl0')
             if not media_url:
-                return str(resp.message("Sorry, I couldn't access the image. Please try sending it again."))
+                return str(resp.message("Lo siento, no pude acceder a la imagen. Por favor envíala de nuevo."))
                 
             # Get caption if any
             caption = request.form.get('Body', '').strip()
             
             # Log for debugging
-            print(f"Received image from {from_number}")
-            print(f"Caption: {caption}")
+            print(f"Recibida imagen de {from_number}")
+            print(f"Mensaje: {caption}")
             
             # Analyze image using GPT-4.1 vision with conversation memory
             reply_text = analyze_image(media_url, caption, from_number)
@@ -155,7 +169,7 @@ def whatsapp_reply():
             # Process text message with conversation memory
             incoming_msg = request.form.get('Body', '').strip()
             if not incoming_msg:
-                reply_text = "I received your message but couldn't understand it. Please send some text or an image for translation."
+                reply_text = "Recibí tu mensaje pero no pude entenderlo. Por favor envía texto o una imagen para traducir."
             else:
                 # Get conversation history
                 messages = get_conversation_history(from_number)
@@ -171,14 +185,14 @@ def whatsapp_reply():
                     gpt_response = client.chat.completions.create(
                         model=MODEL,
                         messages=updated_messages,
-                        temperature=0.7,
+                        temperature=0.3,  # Lower temperature for consistent translations
                         max_tokens=1000
                     )
                     reply_text = gpt_response.choices[0].message.content
                 except Exception as api_error:
                     if "maximum context length" in str(api_error).lower():
                         # Token limit exceeded - trim conversation more aggressively
-                        print(f"Token limit exceeded for {from_number}, trimming conversation")
+                        print(f"Límite de tokens excedido para {from_number}, recortando conversación")
                         
                         # Keep only system message + last 10 messages
                         system_msg = conversations[from_number]["messages"][0]
@@ -190,7 +204,7 @@ def whatsapp_reply():
                         gpt_response = client.chat.completions.create(
                             model=MODEL,
                             messages=trimmed_messages,
-                            temperature=0.7,
+                            temperature=0.3,
                             max_tokens=1000
                         )
                         reply_text = gpt_response.choices[0].message.content
@@ -205,27 +219,27 @@ def whatsapp_reply():
         resp.message(reply_text)
         
     except Exception as e:
-        print(f"Error in whatsapp_reply: {str(e)}")
-        resp.message(f"⚠️ Error processing your request: {str(e)}")
+        print(f"Error en whatsapp_reply: {str(e)}")
+        resp.message(f"⚠️ Error procesando tu solicitud: {str(e)}")
     
     return str(resp)
 
 @app.route("/", methods=['GET'])
 def health_check():
     """Health check endpoint"""
-    return "AI Translation Service is running! 🤖🌍"
+    return "🤖 Servicio de Traducción AI funcionando correctamente 🌍"
 
 @app.route("/stats", methods=['GET'])
 def conversation_stats():
     """Endpoint to see conversation statistics (for debugging)"""
     stats = {
-        "active_conversations": len(conversations),
-        "service": "AI Translation Service",
-        "status": "operational"
+        "conversaciones_activas": len(conversations),
+        "servicio": "Traductor AI Inglés-Español",
+        "estado": "operativo"
     }
     return stats
 
 if __name__ == "__main__":
-    # Use Railway's PORT environment variable
+    # Use Render's PORT environment variable (updated from Railway comment)
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
