@@ -1,7 +1,9 @@
 Flask==3.0.0
 twilio==9.2.3
-openai==1.28.0
+openai==1.23.6
 requests==2.31.0
 Pillow==10.4.0
 python-dotenv==1.0.1
-gunicorn==22.0.0
+gunicorn==21.2.0
+httpx==0.24.1
+httpcore==0.17.3
