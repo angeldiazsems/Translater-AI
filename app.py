@@ -76,9 +76,10 @@ def add_to_conversation(phone_number, role, content):
         conversations[phone_number]["messages"] = [system_msg] + recent_messages
 
 def send_twilio_message(to_number, message):
-    """Send a message using Twilio client"""
+    """Send a message using Twilio client with better error handling"""
     try:
         from twilio.rest import Client
+        from twilio.base.exceptions import TwilioRestException
         
         # Initialize Twilio client
         twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
@@ -90,11 +91,20 @@ def send_twilio_message(to_number, message):
             to=to_number
         )
         
+    except TwilioRestException as e:
+        error_msg = f"Error enviando mensaje Twilio: {str(e)}"
+        print(error_msg)
+        
+        # If it's a rate limit error, try to send a fallback message via webhook response
+        if "429" in str(e) or "daily messages limit" in str(e).lower():
+            print("⚠️ LÍMITE DIARIO DE TWILIO ALCANZADO - Usuario no recibirá respuesta")
+            # We can't send another message since we're at the limit, but at least log it clearly
+            
     except Exception as e:
         print(f"Error enviando mensaje: {str(e)}")
 
-def process_translation_async(from_number, incoming_msg):
-    """Process translation in background and send result"""
+def process_translation_sync(from_number, incoming_msg):
+    """Process translation synchronously and return result"""
     try:
         # Get conversation history
         messages = get_conversation_history(from_number)
@@ -111,25 +121,23 @@ def process_translation_async(from_number, incoming_msg):
             messages=updated_messages,
             temperature=0.3,
             max_tokens=500,
-            timeout=10  # Increased timeout slightly
+            timeout=8  # Keep reasonable timeout for webhook response
         )
         reply_text = gpt_response.choices[0].message.content
         
         # Add assistant response to conversation
         add_to_conversation(from_number, "assistant", reply_text)
         
-        # Send the actual translation
-        send_twilio_message(from_number, reply_text)
+        return reply_text
         
     except Exception as api_error:
-        error_msg = "⚠️ Error procesando mensaje. Intenta de nuevo."
         if "timeout" in str(api_error).lower():
-            error_msg = "⏱️ Traducción tomó mucho tiempo. Por favor intenta de nuevo."
+            return "⏱️ Traducción tomó mucho tiempo. Por favor intenta de nuevo."
         elif "maximum context length" in str(api_error).lower():
             # Handle token limit
             try:
                 system_msg = conversations[from_number]["messages"][0]
-                recent_messages = conversations[from_number]["messages"][-15:]  # Keep more recent messages
+                recent_messages = conversations[from_number]["messages"][-15:]
                 conversations[from_number]["messages"] = [system_msg] + recent_messages
                 
                 trimmed_messages = conversations[from_number]["messages"]
@@ -138,17 +146,18 @@ def process_translation_async(from_number, incoming_msg):
                     messages=trimmed_messages,
                     temperature=0.3,
                     max_tokens=500,
-                    timeout=10
+                    timeout=8
                 )
                 reply_text = gpt_response.choices[0].message.content
-                send_twilio_message(from_number, reply_text)
+                add_to_conversation(from_number, "assistant", reply_text)
+                return reply_text
             except:
-                send_twilio_message(from_number, "⚠️ Error procesando mensaje. Intenta con un mensaje más corto.")
+                return "⚠️ Error procesando mensaje. Intenta con un mensaje más corto."
         else:
-            send_twilio_message(from_number, error_msg)
+            return "⚠️ Error procesando mensaje. Intenta de nuevo."
 
-def process_image_async(from_number, media_url, caption=""):
-    """Process image analysis in background and send result"""
+def analyze_image_sync(media_url, caption="", phone_number=None):
+    """Process image analysis synchronously and return result"""
     try:
         # Download the image with Twilio authentication
         response = requests.get(
@@ -166,7 +175,7 @@ def process_image_async(from_number, media_url, caption=""):
             content_type = 'image/jpeg'
         
         # Get conversation history
-        messages = get_conversation_history(from_number)
+        messages = get_conversation_history(phone_number) if phone_number else []
         
         # Create the user message with image
         user_message = {
@@ -186,7 +195,8 @@ def process_image_async(from_number, media_url, caption=""):
         }
         
         # Add user message to conversation
-        add_to_conversation(from_number, "user", f"[Envió una imagen{f' con mensaje: {caption}' if caption else ''}]")
+        if phone_number:
+            add_to_conversation(phone_number, "user", f"[Envió una imagen{f' con mensaje: {caption}' if caption else ''}]")
         
         # Use conversation history + current image message
         current_messages = messages + [user_message]
@@ -197,21 +207,21 @@ def process_image_async(from_number, media_url, caption=""):
             messages=current_messages,
             temperature=0.3,
             max_tokens=1000,
-            timeout=15  # Longer timeout for image processing
+            timeout=12  # Slightly longer timeout for image processing
         )
         
         assistant_reply = gpt_response.choices[0].message.content
         
         # Add assistant response to conversation
-        add_to_conversation(from_number, "assistant", assistant_reply)
+        if phone_number:
+            add_to_conversation(phone_number, "assistant", assistant_reply)
         
-        # Send the actual analysis
-        send_twilio_message(from_number, assistant_reply)
+        return assistant_reply
         
     except requests.RequestException as e:
-        send_twilio_message(from_number, f"⚠️ Error al descargar la imagen: {str(e)}")
+        return f"⚠️ Error al descargar la imagen: {str(e)}"
     except Exception as e:
-        send_twilio_message(from_number, f"⚠️ Error al analizar la imagen: {str(e)}")
+        return f"⚠️ Error al analizar la imagen: {str(e)}"
 
 @app.route("/whatsapp", methods=['POST'])
 def whatsapp_reply():
@@ -226,43 +236,36 @@ def whatsapp_reply():
         num_media = int(request.form.get('NumMedia', 0))
         
         if num_media > 0:
-            # IMMEDIATE response for images
-            resp.message("📸 Analizando imagen y traduciendo... Un momento por favor.")
-            
-            # Start background processing
+            # For images: Process and send single response
             media_url = request.form.get('MediaUrl0')
             caption = request.form.get('Body', '').strip()
             
-            # Process image in background thread
-            thread = threading.Thread(
-                target=process_image_async, 
-                args=(from_number, media_url, caption),
-                daemon=True
-            )
-            thread.start()
+            try:
+                # Process image synchronously (with timeout protection)
+                reply_text = analyze_image_sync(media_url, caption, from_number)
+                resp.message(reply_text)
+                
+            except Exception as e:
+                resp.message(f"⚠️ Error al procesar imagen: {str(e)}")
             
-            # Return immediate response
             return str(resp)
             
         else:
-            # IMMEDIATE response for text
+            # For text: Process and send single response
             incoming_msg = request.form.get('Body', '').strip()
             if not incoming_msg:
                 resp.message("Recibí tu mensaje pero no pude entenderlo. Por favor envía texto o una imagen para traducir.")
                 return str(resp)
             
-            # Send immediate acknowledgment
-            resp.message("🤖 Traduciendo... Un momento por favor.")
+            try:
+                # Process translation synchronously (with timeout protection)
+                reply_text = process_translation_sync(from_number, incoming_msg)
+                resp.message(reply_text)
+                
+            except Exception as e:
+                resp.message("⚠️ Error procesando mensaje. Intenta de nuevo.")
+                print(f"Error en traducción: {str(e)}")
             
-            # Start background processing
-            thread = threading.Thread(
-                target=process_translation_async, 
-                args=(from_number, incoming_msg),
-                daemon=True
-            )
-            thread.start()
-            
-            # Return immediate response
             return str(resp)
         
     except Exception as e:
@@ -290,14 +293,13 @@ def conversation_stats():
         memory_estimate_kb += (msg_count * 0.1)  # KB
     
     stats = {
-        "conversaciones_totales": total_conversations,
-        "total_mensajes": total_messages,
-        "memoria_estimada_kb": round(memory_estimate_kb, 2),
-        "memoria_estimada_mb": round(memory_estimate_kb / 1024, 3),
+        "total conversations": total_conversations,
+        "total messages": total_messages,
+        "estimated memory(kb)": round(memory_estimate_kb, 2),
+        "estimated memory(mb)": round(memory_estimate_kb / 1024, 3),
         "servicio": "Traductor AI Inglés-Español",
-        "estado": "operativo",
+        "status": "operativo",
         "max_mensajes_por_conversacion": MAX_MESSAGES_PER_CONVERSATION,
-        "nota": "Sin limpieza automática - memoria mínima para 1-2 usuarios"
     }
     return stats
 
