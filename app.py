@@ -1,5 +1,8 @@
 import os
 import base64
+import treading
+import time
+import requests as ping_requests
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 from openai import OpenAI
@@ -150,79 +153,100 @@ def whatsapp_reply():
         num_media = int(request.form.get('NumMedia', 0))
         
         if num_media > 0:
-            # Process image
+            # For images, send immediate response then process
+            resp.message("📸 Analizando imagen y traduciendo... Un momento por favor.")
+            
+            # Send immediate response
+            response_xml = str(resp)
+            
+            # Process image in background (this won't send another message)
             media_url = request.form.get('MediaUrl0')
-            if not media_url:
-                return str(resp.message("Lo siento, no pude acceder a la imagen. Por favor envíala de nuevo."))
-                
-            # Get caption if any
             caption = request.form.get('Body', '').strip()
             
-            # Log for debugging
-            print(f"Recibida imagen de {from_number}")
-            print(f"Mensaje: {caption}")
+            try:
+                # Quick timeout for image processing
+                reply_text = analyze_image(media_url, caption, from_number)
+                
+                # Send follow-up message with actual translation
+                send_followup_message(from_number, reply_text)
+                
+            except Exception as e:
+                send_followup_message(from_number, f"⚠️ Error al procesar imagen: {str(e)}")
             
-            # Analyze image using GPT-4.1 vision with conversation memory
-            reply_text = analyze_image(media_url, caption, from_number)
+            return response_xml
             
         else:
-            # Process text message with conversation memory
+            # For text, send immediate response then process
             incoming_msg = request.form.get('Body', '').strip()
             if not incoming_msg:
-                reply_text = "Recibí tu mensaje pero no pude entenderlo. Por favor envía texto o una imagen para traducir."
+                resp.message("Recibí tu mensaje pero no pude entenderlo. Por favor envía texto o una imagen para traducir.")
+                return str(resp)
             else:
-                # Get conversation history
-                messages = get_conversation_history(from_number)
+                # Send immediate acknowledgment
+                resp.message("🤖 Traduciendo... Un momento por favor.")
+                response_xml = str(resp)
                 
-                # Add user message to conversation
-                add_to_conversation(from_number, "user", incoming_msg)
-                
-                # Get updated messages including the new user message
-                updated_messages = get_conversation_history(from_number)
-                
-                # Get GPT-4.1 response with conversation context
+                # Process in background
                 try:
+                    # Get conversation history
+                    messages = get_conversation_history(from_number)
+                    
+                    # Add user message to conversation
+                    add_to_conversation(from_number, "user", incoming_msg)
+                    
+                    # Get updated messages
+                    updated_messages = get_conversation_history(from_number)
+                    
+                    # Get GPT response
                     gpt_response = client.chat.completions.create(
                         model=MODEL,
                         messages=updated_messages,
-                        temperature=0.3,  # Lower temperature for consistent translations
-                        max_tokens=1000
+                        temperature=0.3,
+                        max_tokens=500,
+                        timeout=8
                     )
                     reply_text = gpt_response.choices[0].message.content
+                    
+                    # Add assistant response to conversation
+                    add_to_conversation(from_number, "assistant", reply_text)
+                    
+                    # Send follow-up with translation
+                    send_followup_message(from_number, reply_text)
+                    
                 except Exception as api_error:
-                    if "maximum context length" in str(api_error).lower():
-                        # Token limit exceeded - trim conversation more aggressively
-                        print(f"Límite de tokens excedido para {from_number}, recortando conversación")
-                        
-                        # Keep only system message + last 10 messages
-                        system_msg = conversations[from_number]["messages"][0]
-                        recent_messages = conversations[from_number]["messages"][-10:]
-                        conversations[from_number]["messages"] = [system_msg] + recent_messages
-                        
-                        # Try again with trimmed conversation
-                        trimmed_messages = conversations[from_number]["messages"]
-                        gpt_response = client.chat.completions.create(
-                            model=MODEL,
-                            messages=trimmed_messages,
-                            temperature=0.3,
-                            max_tokens=1000
-                        )
-                        reply_text = gpt_response.choices[0].message.content
+                    error_msg = "⚠️ Error procesando mensaje. Intenta de nuevo."
+                    if "timeout" in str(api_error).lower():
+                        error_msg = "⏱️ Traducción tomó mucho tiempo. Por favor intenta de nuevo."
+                    elif "maximum context length" in str(api_error).lower():
+                        # Handle token limit
+                        try:
+                            system_msg = conversations[from_number]["messages"][0]
+                            recent_messages = conversations[from_number]["messages"][-10:]
+                            conversations[from_number]["messages"] = [system_msg] + recent_messages
+                            
+                            trimmed_messages = conversations[from_number]["messages"]
+                            gpt_response = client.chat.completions.create(
+                                model=MODEL,
+                                messages=trimmed_messages,
+                                temperature=0.3,
+                                max_tokens=500,
+                                timeout=8
+                            )
+                            reply_text = gpt_response.choices[0].message.content
+                            send_followup_message(from_number, reply_text)
+                        except:
+                            send_followup_message(from_number, "⚠️ Error procesando mensaje. Intenta con un mensaje más corto.")
                     else:
-                        # Different error
-                        raise api_error
+                        send_followup_message(from_number, error_msg)
                 
-                # Add assistant response to conversation
-                add_to_conversation(from_number, "assistant", reply_text)
-                
-        # Send the response
-        resp.message(reply_text)
+                return response_xml
         
     except Exception as e:
         print(f"Error en whatsapp_reply: {str(e)}")
-        resp.message(f"⚠️ Error procesando tu solicitud: {str(e)}")
+        resp.message("⚠️ Error temporal. Por favor intenta de nuevo.")
     
     return str(resp)
+
 
 @app.route("/", methods=['GET'])
 def health_check():
@@ -239,7 +263,48 @@ def conversation_stats():
     }
     return stats
 
+def send_followup_message(to_number, message):
+    """Send a follow-up message using Twilio client"""
+    try:
+        from twilio.rest import Client
+        
+        # Initialize Twilio client
+        twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        
+        # Send follow-up message
+        twilio_client.messages.create(
+            body=message,
+            from_='whatsapp:+14155238886',  # Twilio Sandbox number
+            to=to_number
+        )
+        
+    except Exception as e:
+        print(f"Error enviando mensaje de seguimiento: {str(e)}")
+
+
+def keep_alive():
+    """Ping the app every 10 minutes to prevent sleeping"""
+    while True:
+        try:
+            # Wait 10 minutes
+            time.sleep(600)  # 600 seconds = 10 minutes
+            
+            # Ping your own health endpoint
+            app_url = os.environ.get('RENDER_EXTERNAL_URL', 'https://whatsapp-bot-bx8f.onrender.com')
+            ping_requests.get(f"{app_url}/", timeout=30)
+            print("Keep-alive ping sent")
+            
+        except Exception as e:
+            print(f"Keep-alive error: {str(e)}")
+
+
+
+if not os.environ.get('WERKZEUG_RUN_MAIN'):  # Avoid running twice in debug mode
+    # Start keep-alive thread
+    keep_alive_thread = threading.Thread(target=keep_alive, daemon=True)
+    keep_alive_thread.start()
+
 if __name__ == "__main__":
-    # Use Render's PORT environment variable (updated from Railway comment)
+    # Use Render's PORT environment variable 
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
