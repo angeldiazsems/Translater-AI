@@ -1,6 +1,6 @@
 import os
 import base64
-import treading
+import threading  # Fixed typo: was "treading"
 import time
 import requests as ping_requests
 from flask import Flask, request
