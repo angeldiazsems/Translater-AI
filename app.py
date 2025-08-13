@@ -106,16 +106,21 @@ def send_twilio_message(to_number, message):
 def process_translation_sync(from_number, incoming_msg):
     """Process translation synchronously and return result"""
     try:
+        print(f"🔄 Iniciando traducción para: {from_number[:10]}... | Mensaje: {incoming_msg[:50]}...")
+        
         # Get conversation history
         messages = get_conversation_history(from_number)
+        print(f"📚 Historial obtenido: {len(messages)} mensajes")
         
         # Add user message to conversation
         add_to_conversation(from_number, "user", incoming_msg)
         
         # Get updated messages
         updated_messages = get_conversation_history(from_number)
+        print(f"🔤 Preparando llamada API con {len(updated_messages)} mensajes")
         
         # Get GPT response (ONLY ONE API CALL)
+        print("🤖 Llamando a GitHub Models API...")
         gpt_response = client.chat.completions.create(
             model=MODEL,
             messages=updated_messages,
@@ -124,6 +129,7 @@ def process_translation_sync(from_number, incoming_msg):
             timeout=8  # Keep reasonable timeout for webhook response
         )
         reply_text = gpt_response.choices[0].message.content
+        print(f"✅ Respuesta recibida: {reply_text[:100]}...")
         
         # Add assistant response to conversation
         add_to_conversation(from_number, "assistant", reply_text)
@@ -131,9 +137,13 @@ def process_translation_sync(from_number, incoming_msg):
         return reply_text
         
     except Exception as api_error:
+        error_msg = f"Error específico: {str(api_error)} | Tipo: {type(api_error).__name__}"
+        print(f"❌ {error_msg}")
+        
         if "timeout" in str(api_error).lower():
             return "⏱️ Traducción tomó mucho tiempo. Por favor intenta de nuevo."
         elif "maximum context length" in str(api_error).lower():
+            print("🔄 Intentando con contexto reducido...")
             # Handle token limit
             try:
                 system_msg = conversations[from_number]["messages"][0]
@@ -151,10 +161,11 @@ def process_translation_sync(from_number, incoming_msg):
                 reply_text = gpt_response.choices[0].message.content
                 add_to_conversation(from_number, "assistant", reply_text)
                 return reply_text
-            except:
+            except Exception as retry_error:
+                print(f"❌ Error en retry: {str(retry_error)}")
                 return "⚠️ Error procesando mensaje. Intenta con un mensaje más corto."
         else:
-            return "⚠️ Error procesando mensaje. Intenta de nuevo."
+            return f"⚠️ Error: {str(api_error)[:100]}"  # Return actual error for debugging
 
 def analyze_image_sync(media_url, caption="", phone_number=None):
     """Process image analysis synchronously and return result"""
@@ -263,8 +274,9 @@ def whatsapp_reply():
                 resp.message(reply_text)
                 
             except Exception as e:
-                resp.message("⚠️ Error procesando mensaje. Intenta de nuevo.")
-                print(f"Error en traducción: {str(e)}")
+                error_details = f"Error en traducción: {str(e)} | Tipo: {type(e).__name__}"
+                print(error_details)
+                resp.message(f"⚠️ Error procesando mensaje: {str(e)[:100]}")  # Show partial error to user
             
             return str(resp)
         
