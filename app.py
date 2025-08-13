@@ -23,7 +23,7 @@ TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
 
 ENDPOINT = "https://models.github.ai/inference"
-MODEL = "openai/gpt-4.1"
+MODEL = "gpt-4o-mini"
 
 # Initialize OpenAI client
 client = OpenAI(
