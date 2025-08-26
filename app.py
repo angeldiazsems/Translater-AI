@@ -10,6 +10,7 @@ import requests
 from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
+import tempfile
 
 # Load environment variables from .env file
 load_dotenv()
@@ -218,6 +219,82 @@ def analyze_image_sync(media_url, caption="", phone_number=None):
     except Exception as e:
         return f"⚠️ Error al analizar la imagen: {str(e)}"
 
+def process_voice_memo_sync(media_url, phone_number=None):
+    """Process voice memo by transcribing with OpenAI Whisper and then translating"""
+    try:
+        print(f"🎤 Procesando nota de voz para: {phone_number[:10]}...")
+        
+        # Download the voice memo with Twilio authentication
+        response = requests.get(
+            media_url, 
+            auth=HTTPBasicAuth(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        )
+        response.raise_for_status()
+                
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as temp_audio:
+            temp_audio.write(response.content)
+            temp_audio_path = temp_audio.name
+        
+        try:
+            # Transcribe using OpenAI Whisper API
+            print("🎯 Transcribiendo audio con Whisper...")
+            with open(temp_audio_path, "rb") as audio_file:
+                transcription = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=audio_file,
+                    language="en"  # You can remove this to auto-detect
+                )
+            
+            transcribed_text = transcription.text
+            print(f"📝 Transcripción: {transcribed_text[:100]}...")
+            
+            # Now translate the transcribed text
+            if phone_number:
+                add_to_conversation(phone_number, "user", f"[Envió nota de voz]: {transcribed_text}")
+            
+            # Get conversation history and translate
+            messages = get_conversation_history(phone_number) if phone_number else []
+            
+            # Add the transcribed text as a user message for translation
+            messages.append({
+                "role": "user", 
+                "content": f"Transcribí esta nota de voz: '{transcribed_text}'. Por favor tradúcela al español y responde apropiadamente."
+            })
+            
+            # Get translation/response
+            print("🔄 Traduciendo transcripción...")
+            gpt_response = client.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                temperature=0.3,
+                max_tokens=500,
+                timeout=10
+            )
+            
+            reply_text = gpt_response.choices[0].message.content
+            
+            # Add assistant response to conversation
+            if phone_number:
+                add_to_conversation(phone_number, "assistant", reply_text)
+            
+            # Return transcription + translation
+            return f"🎤 *Nota de voz transcrita:*\n_{transcribed_text}_\n\n📝 *Respuesta:*\n{reply_text}"
+            
+        finally:
+            # Clean up temporary file
+            try:
+                os.unlink(temp_audio_path)
+            except:
+                pass
+                
+    except Exception as e:
+        error_msg = f"Error procesando nota de voz: {str(e)}"
+        print(f"❌ {error_msg}")
+        return f"⚠️ No pude procesar la nota de voz. Error: {str(e)[:100]}"
+
+
+
 @app.route("/whatsapp", methods=['POST'])
 def whatsapp_reply():
     # Initialize Twilio response
@@ -227,29 +304,43 @@ def whatsapp_reply():
         # Get the sender's phone number to track conversation
         from_number = request.form.get('From', '')
         
-        # Check if there's an image
+        # Check if there's media
         num_media = int(request.form.get('NumMedia', 0))
         
         if num_media > 0:
-            # For images: Process and send single response
+            # Get media info
             media_url = request.form.get('MediaUrl0')
+            media_content_type = request.form.get('MediaContentType0', '')
             caption = request.form.get('Body', '').strip()
             
+            print(f"📱 Media recibido - Tipo: {media_content_type}")
+            
             try:
-                # Process image synchronously (with timeout protection)
-                reply_text = analyze_image_sync(media_url, caption, from_number)
+                # Check if it's a voice memo
+                if media_content_type.startswith('audio/'):
+                    print("🎤 Procesando nota de voz...")
+                    reply_text = process_voice_memo_sync(media_url, from_number)
+                
+                # Check if it's an image
+                elif media_content_type.startswith('image/'):
+                    print("🖼️ Procesando imagen...")
+                    reply_text = analyze_image_sync(media_url, caption, from_number)
+                
+                else:
+                    reply_text = f"⚠️ Tipo de archivo no soportado: {media_content_type}. Envía imágenes o notas de voz."
+                
                 resp.message(reply_text)
                 
             except Exception as e:
-                resp.message(f"⚠️ Error al procesar imagen: {str(e)}")
+                resp.message(f"⚠️ Error al procesar archivo multimedia: {str(e)}")
             
             return str(resp)
             
         else:
-            # For text: Process and send single response
+            # For text: Process and send single response (keep your existing text logic)
             incoming_msg = request.form.get('Body', '').strip()
             if not incoming_msg:
-                resp.message("Recibí tu mensaje pero no pude entenderlo. Por favor envía texto o una imagen para traducir.")
+                resp.message("Recibí tu mensaje pero no pude entenderlo. Por favor envía texto, imagen o nota de voz para traducir.")
                 return str(resp)
             
             try:
@@ -260,7 +351,7 @@ def whatsapp_reply():
             except Exception as e:
                 error_details = f"Error en traducción: {str(e)} | Tipo: {type(e).__name__}"
                 print(error_details)
-                resp.message(f"⚠️ Error procesando mensaje: {str(e)[:100]}")  # Show partial error to user
+                resp.message(f"⚠️ Error procesando mensaje: {str(e)[:100]}")
             
             return str(resp)
         
@@ -269,6 +360,7 @@ def whatsapp_reply():
         resp.message("⚠️ Error temporal. Por favor intenta de nuevo.")
     
     return str(resp)
+
 
 @app.route("/", methods=['GET'])
 def health_check():
