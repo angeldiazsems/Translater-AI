@@ -32,7 +32,7 @@ client = OpenAI(
     base_url=ENDPOINT,
     api_key=GITHUB_TOKEN,
 )
-whisper_model = whisper.load_model("small")
+whisper_model = whisper.load_model("base")
 
 # In-memory conversation storage
 # Structure: {phone_number: {"messages": [...], "last_active": datetime}}
