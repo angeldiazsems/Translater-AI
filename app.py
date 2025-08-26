@@ -113,7 +113,7 @@ def process_translation_sync(from_number, incoming_msg):
             messages=updated_messages,
             temperature=0.3,
             max_tokens=1000,
-            timeout=8  # Keep reasonable timeout for webhook response
+            timeout=12 # Keep reasonable timeout for webhook response
         )
         reply_text = gpt_response.choices[0].message.content
         print(f"✅ Respuesta recibida: {reply_text[:100]}...")
@@ -143,7 +143,7 @@ def process_translation_sync(from_number, incoming_msg):
                     messages=trimmed_messages,
                     temperature=0.3,
                     max_tokens=1000,
-                    timeout=8
+                    timeout=12
                 )
                 reply_text = gpt_response.choices[0].message.content
                 add_to_conversation(from_number, "assistant", reply_text)
@@ -205,7 +205,7 @@ def analyze_image_sync(media_url, caption="", phone_number=None):
             messages=current_messages,
             temperature=0.3,
             max_tokens=1200,
-            timeout=12  # Slightly longer timeout for image processing
+            timeout=15  # Slightly longer timeout for image processing
         )
         
         assistant_reply = gpt_response.choices[0].message.content
@@ -250,7 +250,7 @@ def process_voice_memo_sync(media_url, phone_number=None):
                 messages=messages,
                 temperature=0.3,
                 max_tokens=500,
-                timeout=10
+                timeout=12
             )
             
             reply_text = gpt_response.choices[0].message.content
