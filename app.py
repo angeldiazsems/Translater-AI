@@ -2,6 +2,7 @@ import os
 import base64
 import threading
 import time
+import whisper
 import requests as ping_requests
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
@@ -31,6 +32,7 @@ client = OpenAI(
     base_url=ENDPOINT,
     api_key=GITHUB_TOKEN,
 )
+whisper_model = whisper.load_model("small")
 
 # In-memory conversation storage
 # Structure: {phone_number: {"messages": [...], "last_active": datetime}}
@@ -110,7 +112,7 @@ def process_translation_sync(from_number, incoming_msg):
             model=MODEL,
             messages=updated_messages,
             temperature=0.3,
-            max_tokens=500,
+            max_tokens=1000,
             timeout=8  # Keep reasonable timeout for webhook response
         )
         reply_text = gpt_response.choices[0].message.content
@@ -140,7 +142,7 @@ def process_translation_sync(from_number, incoming_msg):
                     model=MODEL,
                     messages=trimmed_messages,
                     temperature=0.3,
-                    max_tokens=500,
+                    max_tokens=1000,
                     timeout=8
                 )
                 reply_text = gpt_response.choices[0].message.content
@@ -202,7 +204,7 @@ def analyze_image_sync(media_url, caption="", phone_number=None):
             model=MODEL,
             messages=current_messages,
             temperature=0.3,
-            max_tokens=1000,
+            max_tokens=1200,
             timeout=12  # Slightly longer timeout for image processing
         )
         
@@ -218,52 +220,31 @@ def analyze_image_sync(media_url, caption="", phone_number=None):
         return f"⚠️ Error al descargar la imagen: {str(e)}"
     except Exception as e:
         return f"⚠️ Error al analizar la imagen: {str(e)}"
-
+    
 def process_voice_memo_sync(media_url, phone_number=None):
-    """Process voice memo by transcribing with OpenAI Whisper and then translating"""
+    """Process voice memo using FREE local Whisper model"""
     try:
-        print(f"🎤 Procesando nota de voz para: {phone_number[:10]}...")
+        # Download the voice file
+        response = requests.get(media_url, auth=HTTPBasicAuth(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
         
-        # Download the voice memo with Twilio authentication
-        response = requests.get(
-            media_url, 
-            auth=HTTPBasicAuth(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        )
-        response.raise_for_status()
-                
-        
+        # Save it temporarily  
         with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as temp_audio:
             temp_audio.write(response.content)
             temp_audio_path = temp_audio.name
         
         try:
-            # Transcribe using OpenAI Whisper API
-            print("🎯 Transcribiendo audio con Whisper...")
-            with open(temp_audio_path, "rb") as audio_file:
-                transcription = client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=audio_file,
-                    language="en"  # You can remove this to auto-detect
-                )
+            # Transcribe with FREE Whisper
+            result = whisper_model.transcribe(temp_audio_path)
+            transcribed_text = result["text"].strip()
             
-            transcribed_text = transcription.text
-            print(f"📝 Transcripción: {transcribed_text[:100]}...")
-            
-            # Now translate the transcribed text
+            # Add to conversation
             if phone_number:
-                add_to_conversation(phone_number, "user", f"[Envió nota de voz]: {transcribed_text}")
+                add_to_conversation(phone_number, "user", f"[Nota de voz]: {transcribed_text}")
             
-            # Get conversation history and translate
-            messages = get_conversation_history(phone_number) if phone_number else []
+            # Translate using your existing system
+            messages = get_conversation_history(phone_number)
+            messages.append({"role": "user", "content": transcribed_text})
             
-            # Add the transcribed text as a user message for translation
-            messages.append({
-                "role": "user", 
-                "content": f"Transcribí esta nota de voz: '{transcribed_text}'. Por favor tradúcela al español y responde apropiadamente."
-            })
-            
-            # Get translation/response
-            print("🔄 Traduciendo transcripción...")
             gpt_response = client.chat.completions.create(
                 model=MODEL,
                 messages=messages,
@@ -274,24 +255,16 @@ def process_voice_memo_sync(media_url, phone_number=None):
             
             reply_text = gpt_response.choices[0].message.content
             
-            # Add assistant response to conversation
             if phone_number:
                 add_to_conversation(phone_number, "assistant", reply_text)
             
-            # Return transcription + translation
-            return f"🎤 *Nota de voz transcrita:*\n_{transcribed_text}_\n\n📝 *Respuesta:*\n{reply_text}"
+            return f"🎤 Escuché: _{transcribed_text}_\n\n📝 {reply_text}"
             
         finally:
-            # Clean up temporary file
-            try:
-                os.unlink(temp_audio_path)
-            except:
-                pass
+            os.unlink(temp_audio_path)  # Delete temp file
                 
     except Exception as e:
-        error_msg = f"Error procesando nota de voz: {str(e)}"
-        print(f"❌ {error_msg}")
-        return f"⚠️ No pude procesar la nota de voz. Error: {str(e)[:100]}"
+        return f"⚠️ Error con nota de voz: {str(e)}"
 
 
 

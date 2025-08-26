@@ -7,3 +7,4 @@ python-dotenv==1.0.1
 gunicorn==21.2.0
 httpx==0.24.1
 httpcore==0.17.3
+openai-whisper
